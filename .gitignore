@@ -12,3 +12,6 @@ Cargo.lock
 # Ignore output images.
 /saved_images/
 *.ppm
+
+# Ignore mac stuff
+.DS_Store
