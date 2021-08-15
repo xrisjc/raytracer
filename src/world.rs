@@ -1,6 +1,5 @@
 use crate::color::Color;
-use crate::light::Light;
-use crate::material::*;
+use crate::light::*;
 use crate::object::*;
 use crate::ray::*;
 use crate::tuple::Tuple;
@@ -8,12 +7,12 @@ use crate::util::*;
 
 pub struct World {
     pub obj_pool: ObjPool,
-    pub light: Light,
+    pub lights: Vec<Light>,
 }
 
 impl World {
-    pub fn new(obj_pool: ObjPool, light: Light) -> Self {
-        World { obj_pool, light }
+    pub fn new(obj_pool: ObjPool, lights: Vec<Light>) -> Self {
+        World { obj_pool, lights }
     }
 
     pub fn color_at(&self, ray: &Ray, depth: u8) -> Color {
@@ -31,23 +30,18 @@ impl World {
     }
 
     pub fn shade_hit(&self, comps: &Computations, depth: u8) -> Color {
-        let in_shadow = self.is_shadowed(comps.over_point);
-        let material = &self.obj_pool.material[comps.object.id];
+        let light_sources =
+            PointLighting::new(comps.over_point, &self.obj_pool, self.lights.iter());
+
+        let material = &self.obj_pool.material[comps.object];
         let color = if let Some(pattern) = &material.pattern {
             let object_point = self.obj_pool.world_to_object(comps.object, comps.point);
             pattern.color_at_object(object_point)
         } else {
             material.color
         };
-        let surface = lighting(
-            color,
-            material,
-            &self.light,
-            comps.point,
-            comps.eyev,
-            comps.normalv,
-            in_shadow,
-        );
+
+        let surface = color * phong(material, light_sources, &comps.normalv, &comps.eyev);
         let reflected = self.reflected_color(&comps, depth);
         let refracted = self.refracted_color(&comps, depth);
 
@@ -59,11 +53,8 @@ impl World {
         }
     }
 
-    pub fn reflected_color(
-        &self,
-        comps: &Computations,
-        depth: u8) -> Color {
-        let material = &self.obj_pool.material[comps.object.id];
+    pub fn reflected_color(&self, comps: &Computations, depth: u8) -> Color {
+        let material = &self.obj_pool.material[comps.object];
 
         if depth == 0 || close_eq(material.reflective, 0.0) {
             return Color::new(0.0, 0.0, 0.0);
@@ -75,12 +66,8 @@ impl World {
         color * material.reflective
     }
 
-    pub fn refracted_color(
-        &self,
-        comps: &Computations,
-        depth: u8
-    ) -> Color {
-        let material = &self.obj_pool.material[comps.object.id];
+    pub fn refracted_color(&self, comps: &Computations, depth: u8) -> Color {
+        let material = &self.obj_pool.material[comps.object];
 
         if depth == 0 || close_eq(material.transparency, 0.0) {
             return Color::new(0.0, 0.0, 0.0);
@@ -100,16 +87,6 @@ impl World {
         let refracted_ray = Ray::new(comps.under_point, direction);
 
         self.color_at(&refracted_ray, depth - 1) * material.transparency
-    }
-
-    pub fn is_shadowed(&self, point: Tuple) -> bool {
-        let lightv = self.light.position - point;
-        let distance_to_light = lightv.magnitude();
-        let lightv = lightv.normalize();
-        let shadow_ray = Ray::new(point, lightv);
-        let xs = self.obj_pool.intersect(&shadow_ray);
-
-        xs.iter().any(|x| x.t > 0.0 && x.t < distance_to_light)
     }
 }
 
@@ -152,7 +129,7 @@ pub fn prepare_computations(
             if x1.t == x.t {
                 n1 = containers
                     .last()
-                    .map(|o| object_pool.material[o.id].refractive_index)
+                    .map(|&o| object_pool.material[o].refractive_index)
                     .unwrap_or(1.0);
             }
 
@@ -165,7 +142,7 @@ pub fn prepare_computations(
             if x1.t == x.t {
                 n2 = containers
                     .last()
-                    .map(|o| object_pool.material[o.id].refractive_index)
+                    .map(|&o| object_pool.material[o].refractive_index)
                     .unwrap_or(1.0);
                 break;
             }
@@ -185,45 +162,6 @@ pub fn prepare_computations(
         reflectv,
         n1,
         n2,
-    }
-}
-
-pub fn lighting(
-    color: Color,
-    material: &Material,
-    light: &Light,
-    point: Tuple,
-    eye_v: Tuple,
-    normal_v: Tuple,
-    in_shadow: bool,
-) -> Color {
-    if in_shadow {
-        return color * material.ambient;
-    }
-
-    let effective_color = color * light.intensity;
-
-    let light_v = (light.position - point).normalize();
-
-    let ambient = effective_color * material.ambient;
-
-    let light_dot_normal = light_v.dot(normal_v);
-    if light_dot_normal < 0.0 {
-        ambient
-    } else {
-        let diffuse = effective_color * material.diffuse * light_dot_normal;
-
-        let reflect_v = (-light_v).reflect(normal_v);
-        let reflect_dot_eye = reflect_v.dot(eye_v);
-
-        let specular = if reflect_dot_eye <= 0.0 {
-            Color::new(0.0, 0.0, 0.0)
-        } else {
-            let factor = reflect_dot_eye.powf(material.shininess);
-            light.intensity * material.specular * factor
-        };
-
-        ambient + diffuse + specular
     }
 }
 
@@ -248,4 +186,73 @@ pub fn schlick(eyev: Tuple, normalv: Tuple, n1: f64, n2: f64) -> f64 {
     let x = 1.0 - cos;
 
     r0 + (1.0 - r0) * x * x * x * x * x
+}
+
+/// Iterates through lights sources from a world that are illuminating a point.
+struct PointLighting<'a, L>
+where
+    L: Iterator<Item = &'a Light>,
+{
+    point: Tuple,
+    object_pool: &'a ObjPool,
+    lights: L,
+}
+
+impl<'a, L> PointLighting<'a, L>
+where
+    L: Iterator<Item = &'a Light>,
+{
+    /// Primary PointLighting constructor.
+    fn new(point: Tuple, object_pool: &'a ObjPool, lights: L) -> Self {
+        PointLighting {
+            point,
+            object_pool,
+            lights,
+        }
+    }
+}
+
+impl<'a, L> Iterator for PointLighting<'a, L>
+where
+    L: Iterator<Item = &'a Light>,
+{
+    type Item = LightSource;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Find the next unblocked light.
+        while let Some(light) = self.lights.next() {
+            // Get LightSource
+            let light_source = match light {
+                Light::Point {
+                    position,
+                    intensity,
+                } => {
+                    let direction = *position - self.point;
+                    let distance = direction.magnitude();
+                    let direction = direction.normalize();
+                    LightSource::new(*intensity, direction, distance)
+                }
+                Light::Directional {
+                    direction,
+                    intensity,
+                } => LightSource::new(*intensity, -*direction, f64::MAX),
+            };
+
+            // Trace a shadow ray. The light is blocked if there is an
+            // intersection between the point and the light.
+            let light_blocked = if light_source.distance.is_finite() {
+                let shadow_ray = Ray::new(self.point, light_source.direction);
+                let xs = self.object_pool.intersect(&shadow_ray);
+                xs.iter().any(|x| x.t > 0.0 && x.t < light_source.distance)
+            } else {
+                false
+            };
+
+            // If light is not blocked, it is the next light.
+            if !light_blocked {
+                return Some(light_source);
+            }
+        }
+        None
+    }
 }

@@ -1,10 +1,11 @@
 use crate::canvas::*;
+use crate::color::*;
 use crate::matrix::*;
 use crate::ray::*;
 use crate::tuple::*;
 use crate::world::*;
-
 pub struct Camera {
+
     hsize: usize,
     vsize: usize,
     field_of_view: f64,
@@ -46,12 +47,12 @@ impl Camera {
         self.transform_inverse = transform.inverse();
     }
 
-    pub fn ray_for_pixel(&self, x: usize, y: usize) -> Ray {
+    pub fn ray_for_pixel(&self, x: usize, y: usize, u: f64, v: f64) -> Ray {
         let px = x as f64;
         let py = y as f64;
 
-        let xoffset = (px + 0.5) * self.pixel_size;
-        let yoffset = (py + 0.5) * self.pixel_size;
+        let xoffset = (px + u) * self.pixel_size;
+        let yoffset = (py + v) * self.pixel_size;
 
         let world_x = self.half_width - xoffset;
         let world_y = self.half_height - yoffset;
@@ -64,14 +65,55 @@ impl Camera {
     }
 
     pub fn render(&self, world: &World) -> Canvas {
+        let sample_count = 9;
         let mut image = Canvas::new(self.hsize, self.vsize);
         for y in 0..self.vsize {
             for x in 0..self.hsize {
-                let ray = self.ray_for_pixel(x, y);
-                let color = world.color_at(&ray, 5);
+                let mut color = Color::new(0.0, 0.0, 0.0);
+                for (u, v) in RayOffsets::new(sample_count) {
+                    if x == 0 && y == 0 {
+                        println!("({}, {})", u, v);
+                    }
+                    let ray = self.ray_for_pixel(x, y, u, v);
+                    color = color + world.color_at(&ray, 5);
+                }
+                color = color * (1.0 / (sample_count as f64));
                 image.write_pixel(x, y, color);
             }
         }
         image
+    }
+}
+
+
+
+/// Iterates through rays generated for a given pixel.
+struct RayOffsets {
+    count: i64,
+    current: i64,
+}
+
+impl RayOffsets {
+    fn new(count: i64) -> Self {
+        let current = count;
+        RayOffsets { count, current }
+    }
+}
+
+impl Iterator for RayOffsets {
+    type Item = (f64, f64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.current -= 1;
+        match self.current {
+            x if x < 0 => None,
+            0 => Some((0.5, 0.5)),
+            x => {
+                let angle = 2.0 * std::f64::consts::PI * ((x as f64) / (self.count as f64));
+                let u = angle.sin() / 4.0 + 0.5;
+                let v = angle.cos() / 4.0 + 0.5;
+                Some((u, v))
+            }
+        }
     }
 }
